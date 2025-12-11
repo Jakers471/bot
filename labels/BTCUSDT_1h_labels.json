@@ -1,0 +1,55 @@
+{
+  "labels": [
+    {
+      "start_idx": 20502,
+      "end_idx": 20693,
+      "label": 2,
+      "created_at": "2025-12-11T11:35:36.113153"
+    },
+    {
+      "start_idx": 21595,
+      "end_idx": 24936,
+      "label": 0,
+      "created_at": "2025-12-11T11:42:10.536310"
+    },
+    {
+      "start_idx": 26368,
+      "end_idx": 26803,
+      "label": 1,
+      "created_at": "2025-12-11T11:42:25.266141"
+    },
+    {
+      "start_idx": 26805,
+      "end_idx": 27820,
+      "label": 0,
+      "created_at": "2025-12-11T11:42:34.439674"
+    },
+    {
+      "start_idx": 27940,
+      "end_idx": 28238,
+      "label": 1,
+      "created_at": "2025-12-11T11:42:43.025825"
+    },
+    {
+      "start_idx": 30261,
+      "end_idx": 30472,
+      "label": 1,
+      "created_at": "2025-12-11T11:42:59.419866"
+    },
+    {
+      "start_idx": 30472,
+      "end_idx": 31671,
+      "label": 0,
+      "created_at": "2025-12-11T11:43:05.745846"
+    }
+  ],
+  "metadata": {
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "label_classes": {
+      "0": "ranging",
+      "1": "trending_up",
+      "2": "trending_down"
+    }
+  }
+}
