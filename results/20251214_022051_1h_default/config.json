@@ -1,0 +1,14 @@
+{
+  "config_name": "default",
+  "parameters": {
+    "bullish_threshold_up": 0.75,
+    "bullish_threshold_down": 0.35,
+    "price_pos_up": 0.65,
+    "price_pos_down": 0.35,
+    "spread_min": 0.3,
+    "min_bars": 15,
+    "hysteresis": 2,
+    "use_ema_smooth": true,
+    "ema_span": 5
+  }
+}

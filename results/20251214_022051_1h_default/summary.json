@@ -1,0 +1,49 @@
+{
+  "metadata": {
+    "config_name": "default",
+    "symbol": "BTCUSDT",
+    "interval": "1h",
+    "timestamp": "2025-12-14T02:20:51.247648",
+    "no_lookahead": true
+  },
+  "parameters": {
+    "initial_capital": 10000,
+    "position_size": 0.1,
+    "commission": 0.001,
+    "slippage": 0.0005,
+    "start_date": null,
+    "end_date": null
+  },
+  "metrics": {
+    "num_trades": 577,
+    "total_return": -14.349520902315199,
+    "sharpe_ratio": -0.07916158283767429,
+    "max_drawdown": 22.39146895450869,
+    "win_rate": 35.008665511265164,
+    "profit_factor": 0.8574451462073218,
+    "avg_win": 42.72778395159109,
+    "avg_loss": -26.84257186254106,
+    "largest_win": 272.6378511566397,
+    "largest_loss": -158.65979522078695,
+    "avg_trade_duration_bars": 60.37781629116118,
+    "total_commission_paid": 1011.0750354902741,
+    "total_slippage_cost": 505.53751774513705,
+    "net_profit": -1434.9520902315198,
+    "data_start": "2020-01-02 16:00:00",
+    "data_end": "2025-11-30 23:00:00",
+    "data_period_days": 2159,
+    "data_period_str": "5y 11m 29d",
+    "trading_period_days": 2157,
+    "trading_period_str": "5y 11m 27d",
+    "first_trade": "2020-01-04 01:00:00",
+    "last_trade": "2025-11-30 06:00:00"
+  },
+  "summary": {
+    "initial_capital": 10000.0,
+    "final_capital": 8565.04790976848,
+    "total_trades": 577,
+    "total_return": -14.349520902315199,
+    "sharpe_ratio": -0.07916158283767429,
+    "max_drawdown": 22.39146895450869
+  }
+}

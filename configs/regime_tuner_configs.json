@@ -1,0 +1,35 @@
+{
+  "default": {
+    "bullish_threshold_up": 0.75,
+    "bullish_threshold_down": 0.35,
+    "price_pos_up": 0.65,
+    "price_pos_down": 0.35,
+    "spread_min": 0.3,
+    "min_bars": 15,
+    "hysteresis": 2,
+    "use_ema_smooth": true,
+    "ema_span": 5
+  },
+  "aggressive": {
+    "bullish_threshold_up": 0.6,
+    "bullish_threshold_down": 0.4,
+    "price_pos_up": 0.55,
+    "price_pos_down": 0.45,
+    "spread_min": 0.2,
+    "min_bars": 5,
+    "hysteresis": 1,
+    "use_ema_smooth": true,
+    "ema_span": 3
+  },
+  "conservative": {
+    "bullish_threshold_up": 0.8,
+    "bullish_threshold_down": 0.2,
+    "price_pos_up": 0.75,
+    "price_pos_down": 0.25,
+    "spread_min": 0.5,
+    "min_bars": 20,
+    "hysteresis": 5,
+    "use_ema_smooth": true,
+    "ema_span": 10
+  }
+}

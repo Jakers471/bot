@@ -1,0 +1,66 @@
+================================================================================
+MAR TRADING BOT - BACKTEST RESULTS
+================================================================================
+
+RUN INFORMATION
+--------------------------------------------------------------------------------
+Timestamp:        2025-12-14 02:20:51
+Config Name:      default
+Symbol:           BTCUSDT
+Interval:         1h
+NO LOOK-AHEAD:    CONFIRMED
+
+DATA PERIOD
+--------------------------------------------------------------------------------
+Start:            2020-01-02 16:00:00
+End:              2025-11-30 23:00:00
+Duration:         5y 11m 29d (2159 days)
+
+First Trade:      2020-01-04 01:00:00
+Last Trade:       2025-11-30 06:00:00
+Trading Period:   5y 11m 27d (2157 days)
+
+BACKTEST PARAMETERS
+--------------------------------------------------------------------------------
+Initial Capital:  $10,000.00
+Position Size:    10.0%
+Commission:       0.100% per trade
+Slippage:         0.050% per trade
+
+REGIME DETECTION CONFIG
+--------------------------------------------------------------------------------
+Bullish Threshold Up:    0.75
+Bullish Threshold Down:  0.35
+Price Position Up:       0.65
+Price Position Down:     0.35
+Spread Minimum:          0.3
+Min Bars:                15
+Hysteresis:              2
+Use EMA Smoothing:       True
+EMA Span:                5
+
+PERFORMANCE SUMMARY
+--------------------------------------------------------------------------------
+Total Trades:     577
+Initial Capital:  $10,000.00
+Final Capital:    $8,565.05
+Total Return:     -14.35%
+Sharpe Ratio:     -0.08
+Max Drawdown:     22.39%
+
+TRADE STATISTICS
+--------------------------------------------------------------------------------
+Win Rate:         35.01%
+Profit Factor:    0.86
+Average Win:      $42.73
+Average Loss:     $-26.84
+Largest Win:      $272.64
+Largest Loss:     $-158.66
+
+================================================================================
+IMPORTANT NOTES:
+- This backtest is CAUSAL and contains NO LOOK-AHEAD BIAS
+- Regime changes require confirmation over multiple bars
+- Trades execute at the NEXT bar's open after signal generation
+- Slippage and commission are applied to all trades
+================================================================================
