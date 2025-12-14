@@ -90,8 +90,29 @@ Examples:
     parser.add_argument(
         '--position-size',
         type=float,
-        default=0.1,
-        help='Position size as fraction of capital (default: 0.1 = 10%%)'
+        default=None,
+        help='Position size as fraction of capital (default: auto-calculated from risk)'
+    )
+
+    parser.add_argument(
+        '--risk-per-trade',
+        type=float,
+        default=0.02,
+        help='Max risk per trade as fraction of account (default: 0.02 = 2%%)'
+    )
+
+    parser.add_argument(
+        '--stop-loss-pct',
+        type=float,
+        default=0.03,
+        help='Stop loss as fraction of entry price (default: 0.03 = 3%%)'
+    )
+
+    parser.add_argument(
+        '--risk-reward',
+        type=float,
+        default=3.0,
+        help='Risk/reward ratio for take profit (default: 3.0 = 1:3)'
     )
 
     parser.add_argument(
@@ -140,22 +161,29 @@ Examples:
 
 
 def calculate_buy_and_hold(df: pd.DataFrame, initial_capital: float, position_size: float,
-                           commission: float, slippage: float) -> dict:
+                           commission: float, slippage: float,
+                           risk_per_trade: float = 0.02, stop_loss_pct: float = 0.03) -> dict:
     """
     Calculate buy-and-hold benchmark for comparison.
 
     Args:
         df: DataFrame with OHLCV data
         initial_capital: Starting capital
-        position_size: Fraction of capital to invest
+        position_size: Fraction of capital to invest (None = auto-calculate)
         commission: Commission rate
         slippage: Slippage rate
+        risk_per_trade: For auto-calculating position size
+        stop_loss_pct: For auto-calculating position size
 
     Returns:
         Dictionary with buy-and-hold metrics
     """
     if len(df) < 2:
         return {'total_return': 0.0, 'max_drawdown': 0.0}
+
+    # Auto-calculate position size if not provided
+    if position_size is None:
+        position_size = min(risk_per_trade / stop_loss_pct, 1.0)
 
     # Buy at first bar's open (with slippage and commission)
     entry_price = df.iloc[0]['open'] * (1 + slippage)
@@ -331,14 +359,22 @@ def detect_regimes(df: pd.DataFrame, params: dict) -> pd.DataFrame:
 
 
 def simulate_regime_strategy(df: pd.DataFrame, initial_capital: float, position_size: float,
-                             commission: float, slippage: float = 0.0005) -> dict:
+                             commission: float, slippage: float = 0.0005,
+                             risk_per_trade: float = 0.02, stop_loss_pct: float = 0.03,
+                             risk_reward: float = 3.0) -> dict:
     """
-    Simulate trading based on regime predictions.
+    Simulate trading based on regime predictions with proper risk management.
 
     IMPORTANT: NO LOOK-AHEAD BIAS
     - Signal generated at bar N's close
     - Trade executed at bar N+1's OPEN (realistic execution)
     - Slippage applied to entry and exit
+
+    RISK MANAGEMENT:
+    - Stop-loss: Exit if price moves stop_loss_pct against position
+    - Take-profit: Exit if price moves (stop_loss_pct * risk_reward) in favor
+    - Position sizing: risk_per_trade / stop_loss_pct (if position_size is None)
+    - Max loss per trade: 2% of account (default)
 
     Regime 0 (ranging): Close position
     Regime 1 (trending_up): Go LONG
@@ -347,9 +383,12 @@ def simulate_regime_strategy(df: pd.DataFrame, initial_capital: float, position_
     Args:
         df: DataFrame with regime predictions
         initial_capital: Starting capital
-        position_size: Fraction of capital per trade
+        position_size: Fraction of capital per trade (None = auto-calculate from risk)
         commission: Commission rate (e.g., 0.001 = 0.1%)
         slippage: Slippage rate (e.g., 0.0005 = 0.05%)
+        risk_per_trade: Max risk per trade as fraction of account (default 0.02 = 2%)
+        stop_loss_pct: Stop loss distance as fraction of entry price (default 0.03 = 3%)
+        risk_reward: Risk/reward ratio for take profit (default 3.0 = 1:3)
 
     Returns:
         Dictionary with trades, equity curve, and metrics
@@ -360,129 +399,187 @@ def simulate_regime_strategy(df: pd.DataFrame, initial_capital: float, position_
     total_commission_paid = 0.0
     total_slippage_cost = 0.0
 
+    # Exit type counters
+    exit_counts = {'stop_loss': 0, 'take_profit': 0, 'regime_change': 0, 'end_of_data': 0}
+
+    # Calculate take profit distance
+    take_profit_pct = stop_loss_pct * risk_reward
+
     current_position = None  # None, 'long', or 'short'
     entry_price = None
     entry_time = None
     entry_idx = None
+    stop_loss_price = None
+    take_profit_price = None
+    trade_position_size = None  # Position size for current trade
 
     # We need to track the PREVIOUS bar's regime to know when signal was generated
     # Then execute on CURRENT bar's open
-    prev_regime = None
     pending_action = None  # ('enter', side) or ('exit',) or ('reverse', side)
 
     df_list = df.reset_index(drop=True)
 
+    def calculate_position_size(current_equity):
+        """Calculate position size based on risk parameters."""
+        if position_size is not None:
+            return position_size
+        # Risk-based position sizing: risk_per_trade / stop_loss_pct
+        # If risking 2% of account with 3% stop, position = 2%/3% = 66.7%
+        calculated_size = risk_per_trade / stop_loss_pct
+        # Cap at 100% of equity
+        return min(calculated_size, 1.0)
+
+    def close_position(row_idx, exit_price_raw, exit_reason):
+        """Helper to close current position and record trade."""
+        nonlocal current_position, entry_price, entry_time, entry_idx
+        nonlocal stop_loss_price, take_profit_price, trade_position_size
+        nonlocal equity, total_commission_paid, total_slippage_cost
+
+        row = df_list.iloc[row_idx]
+        timestamp = row['open_time']
+
+        # Apply slippage to exit
+        if current_position == 'long':
+            exit_price = exit_price_raw * (1 - slippage)
+            price_change = (exit_price - entry_price) / entry_price
+        else:  # short
+            exit_price = exit_price_raw * (1 + slippage)
+            price_change = (entry_price - exit_price) / entry_price
+
+        # Calculate PnL
+        pnl_pct = price_change - (2 * commission) - (2 * slippage)
+        trade_capital = equity * trade_position_size
+        pnl = trade_capital * pnl_pct
+
+        # Track costs
+        trade_commission = trade_capital * commission * 2
+        trade_slippage = trade_capital * slippage * 2
+        total_commission_paid += trade_commission
+        total_slippage_cost += trade_slippage
+
+        equity += pnl
+
+        # Calculate trade duration in bars
+        duration_bars = row_idx - entry_idx
+
+        trade = {
+            'entry_time': str(entry_time),
+            'exit_time': str(timestamp),
+            'entry_idx': int(entry_idx),
+            'exit_idx': int(row_idx),
+            'duration_bars': int(duration_bars),
+            'entry_price': float(entry_price),
+            'exit_price': float(exit_price),
+            'stop_loss': float(stop_loss_price) if stop_loss_price else None,
+            'take_profit': float(take_profit_price) if take_profit_price else None,
+            'side': current_position,
+            'exit_reason': exit_reason,
+            'pnl': float(pnl),
+            'pnl_pct': float(pnl_pct * 100),
+            'position_size': float(trade_position_size),
+            'commission_paid': float(trade_commission),
+            'slippage_cost': float(trade_slippage),
+            'capital_before': float(equity - pnl),
+            'capital_after': float(equity)
+        }
+        trades.append(trade)
+        exit_counts[exit_reason] += 1
+
+        # Reset position state
+        current_position = None
+        entry_price = None
+        entry_time = None
+        entry_idx = None
+        stop_loss_price = None
+        take_profit_price = None
+        trade_position_size = None
+
+        return trade
+
     for i in range(len(df_list)):
         row = df_list.iloc[i]
         timestamp = row['open_time']
-        open_price = row['open']  # Execute at OPEN, not close
+        open_price = row['open']
+        high_price = row['high']
+        low_price = row['low']
         close_price = row['close']
         regime = row['regime']
 
+        # CHECK STOP-LOSS / TAKE-PROFIT FIRST (before any new actions)
+        # This uses the current bar's high/low to check if SL/TP was hit
+        if current_position is not None:
+            sl_hit = False
+            tp_hit = False
+
+            if current_position == 'long':
+                # For long: SL hit if low <= stop_loss_price, TP hit if high >= take_profit_price
+                if low_price <= stop_loss_price:
+                    sl_hit = True
+                elif high_price >= take_profit_price:
+                    tp_hit = True
+            else:  # short
+                # For short: SL hit if high >= stop_loss_price, TP hit if low <= take_profit_price
+                if high_price >= stop_loss_price:
+                    sl_hit = True
+                elif low_price <= take_profit_price:
+                    tp_hit = True
+
+            # Process SL/TP exits (SL takes priority if both hit in same bar)
+            if sl_hit:
+                close_position(i, stop_loss_price, 'stop_loss')
+                pending_action = None  # Clear any pending action
+            elif tp_hit:
+                close_position(i, take_profit_price, 'take_profit')
+                pending_action = None  # Clear any pending action
+
         # EXECUTE pending action from previous bar's signal (at current bar's OPEN)
-        if pending_action is not None:
+        if pending_action is not None and current_position is None:
             action_type = pending_action[0]
 
-            if action_type == 'exit' and current_position is not None:
-                # Exit position at this bar's open
-                exit_price = open_price * (1 - slippage) if current_position == 'long' else open_price * (1 + slippage)
-
-                if current_position == 'long':
-                    price_change = (exit_price - entry_price) / entry_price
-                else:  # short
-                    price_change = (entry_price - exit_price) / entry_price
-
-                pnl_pct = price_change - (2 * commission) - (2 * slippage)
-                trade_capital = equity * position_size
-                pnl = trade_capital * pnl_pct
-
-                # Track costs
-                trade_commission = trade_capital * commission * 2  # entry + exit
-                trade_slippage = trade_capital * slippage * 2  # entry + exit
-                total_commission_paid += trade_commission
-                total_slippage_cost += trade_slippage
-
-                equity += pnl
-
-                # Calculate trade duration in bars
-                duration_bars = i - entry_idx
-
-                trade = {
-                    'entry_time': str(entry_time),
-                    'exit_time': str(timestamp),
-                    'entry_idx': int(entry_idx),
-                    'exit_idx': int(i),
-                    'duration_bars': int(duration_bars),
-                    'entry_price': float(entry_price),
-                    'exit_price': float(exit_price),
-                    'side': current_position,
-                    'pnl': float(pnl),
-                    'pnl_pct': float(pnl_pct * 100),
-                    'commission_paid': float(trade_commission),
-                    'slippage_cost': float(trade_slippage),
-                    'capital_before': float(equity - pnl),
-                    'capital_after': float(equity)
-                }
-                trades.append(trade)
-
-                current_position = None
-                entry_price = None
-                entry_time = None
-                entry_idx = None
-
-            elif action_type == 'enter' and current_position is None:
+            if action_type == 'enter':
                 # Enter new position at this bar's open
                 side = pending_action[1]
-                entry_price = open_price * (1 + slippage) if side == 'long' else open_price * (1 - slippage)
+                trade_position_size = calculate_position_size(equity)
+
+                if side == 'long':
+                    entry_price = open_price * (1 + slippage)
+                    stop_loss_price = entry_price * (1 - stop_loss_pct)
+                    take_profit_price = entry_price * (1 + take_profit_pct)
+                else:  # short
+                    entry_price = open_price * (1 - slippage)
+                    stop_loss_price = entry_price * (1 + stop_loss_pct)
+                    take_profit_price = entry_price * (1 - take_profit_pct)
+
                 entry_time = timestamp
                 entry_idx = i
                 current_position = side
 
-            elif action_type == 'reverse' and current_position is not None:
-                # Exit current position
-                exit_price = open_price * (1 - slippage) if current_position == 'long' else open_price * (1 + slippage)
+            pending_action = None
 
-                if current_position == 'long':
-                    price_change = (exit_price - entry_price) / entry_price
-                else:
-                    price_change = (entry_price - exit_price) / entry_price
+        elif pending_action is not None and current_position is not None:
+            action_type = pending_action[0]
 
-                pnl_pct = price_change - (2 * commission) - (2 * slippage)
-                trade_capital = equity * position_size
-                pnl = trade_capital * pnl_pct
+            if action_type == 'exit':
+                # Exit position at this bar's open (regime change)
+                close_position(i, open_price, 'regime_change')
 
-                # Track costs
-                trade_commission = trade_capital * commission * 2  # entry + exit
-                trade_slippage = trade_capital * slippage * 2  # entry + exit
-                total_commission_paid += trade_commission
-                total_slippage_cost += trade_slippage
-
-                equity += pnl
-
-                # Calculate trade duration in bars
-                duration_bars = i - entry_idx
-
-                trade = {
-                    'entry_time': str(entry_time),
-                    'exit_time': str(timestamp),
-                    'entry_idx': int(entry_idx),
-                    'exit_idx': int(i),
-                    'duration_bars': int(duration_bars),
-                    'entry_price': float(entry_price),
-                    'exit_price': float(exit_price),
-                    'side': current_position,
-                    'pnl': float(pnl),
-                    'pnl_pct': float(pnl_pct * 100),
-                    'commission_paid': float(trade_commission),
-                    'slippage_cost': float(trade_slippage),
-                    'capital_before': float(equity - pnl),
-                    'capital_after': float(equity)
-                }
-                trades.append(trade)
+            elif action_type == 'reverse':
+                # Exit current position first
+                close_position(i, open_price, 'regime_change')
 
                 # Enter new position
                 new_side = pending_action[1]
-                entry_price = open_price * (1 + slippage) if new_side == 'long' else open_price * (1 - slippage)
+                trade_position_size = calculate_position_size(equity)
+
+                if new_side == 'long':
+                    entry_price = open_price * (1 + slippage)
+                    stop_loss_price = entry_price * (1 - stop_loss_pct)
+                    take_profit_price = entry_price * (1 + take_profit_pct)
+                else:  # short
+                    entry_price = open_price * (1 - slippage)
+                    stop_loss_price = entry_price * (1 + stop_loss_pct)
+                    take_profit_price = entry_price * (1 - take_profit_pct)
+
                 entry_time = timestamp
                 entry_idx = i
                 current_position = new_side
@@ -490,7 +587,7 @@ def simulate_regime_strategy(df: pd.DataFrame, initial_capital: float, position_
             pending_action = None
 
         # GENERATE signal for next bar (based on current bar's close/regime)
-        # Determine desired position based on regime
+        # Only generate if not already in the desired position
         if regime == 1:
             desired_position = 'long'
         elif regime == 2:
@@ -503,12 +600,9 @@ def simulate_regime_strategy(df: pd.DataFrame, initial_capital: float, position_
             if desired_position is not None:
                 pending_action = ('enter', desired_position)
         elif current_position != desired_position:
-            # Position needs to change
             if desired_position is None:
-                # Exit position
                 pending_action = ('exit',)
             else:
-                # Reverse position (exit current, enter new)
                 pending_action = ('reverse', desired_position)
 
         # Record equity at this point
@@ -517,58 +611,59 @@ def simulate_regime_strategy(df: pd.DataFrame, initial_capital: float, position_
             'equity': float(equity)
         })
 
-        prev_regime = regime
-
-    # Close any remaining position at the end (use last bar's close as proxy for final value)
+    # Close any remaining position at the end
     if current_position is not None:
         exit_price = df_list.iloc[-1]['close']
-        exit_time = df_list.iloc[-1]['open_time']
 
         if current_position == 'long':
             price_change = (exit_price - entry_price) / entry_price
-        else:  # short
+        else:
             price_change = (entry_price - exit_price) / entry_price
 
         pnl_pct = price_change - (2 * commission) - (2 * slippage)
-        trade_capital = equity * position_size
+        trade_capital = equity * trade_position_size
         pnl = trade_capital * pnl_pct
 
-        # Track costs
-        trade_commission = trade_capital * commission * 2  # entry + exit
-        trade_slippage = trade_capital * slippage * 2  # entry + exit
+        trade_commission = trade_capital * commission * 2
+        trade_slippage = trade_capital * slippage * 2
         total_commission_paid += trade_commission
         total_slippage_cost += trade_slippage
 
         equity += pnl
-
-        # Calculate trade duration in bars
         duration_bars = len(df_list) - 1 - entry_idx
 
         trade = {
             'entry_time': str(entry_time),
-            'exit_time': str(exit_time),
+            'exit_time': str(df_list.iloc[-1]['open_time']),
             'entry_idx': int(entry_idx),
             'exit_idx': len(df_list) - 1,
             'duration_bars': int(duration_bars),
             'entry_price': float(entry_price),
             'exit_price': float(exit_price),
+            'stop_loss': float(stop_loss_price) if stop_loss_price else None,
+            'take_profit': float(take_profit_price) if take_profit_price else None,
             'side': current_position,
+            'exit_reason': 'end_of_data',
             'pnl': float(pnl),
             'pnl_pct': float(pnl_pct * 100),
+            'position_size': float(trade_position_size),
             'commission_paid': float(trade_commission),
             'slippage_cost': float(trade_slippage),
             'capital_before': float(equity - pnl),
             'capital_after': float(equity)
         }
         trades.append(trade)
+        exit_counts['end_of_data'] += 1
 
-        # Update final equity
         if equity_curve:
             equity_curve[-1]['equity'] = float(equity)
 
-    # Calculate metrics (pass df for time period calculation)
+    # Calculate metrics
     metrics = calculate_metrics(trades, equity_curve, initial_capital, df,
                                 total_commission_paid, total_slippage_cost)
+
+    # Add exit breakdown to metrics
+    metrics['exit_counts'] = exit_counts
 
     return {
         'trades': trades,
@@ -577,7 +672,13 @@ def simulate_regime_strategy(df: pd.DataFrame, initial_capital: float, position_
         'initial_capital': float(initial_capital),
         'final_capital': float(equity),
         'total_commission_paid': float(total_commission_paid),
-        'total_slippage_cost': float(total_slippage_cost)
+        'total_slippage_cost': float(total_slippage_cost),
+        'risk_params': {
+            'risk_per_trade': float(risk_per_trade),
+            'stop_loss_pct': float(stop_loss_pct),
+            'take_profit_pct': float(take_profit_pct),
+            'risk_reward': float(risk_reward)
+        }
     }
 
 
@@ -738,38 +839,50 @@ def print_trade_summary(trades: list, show_n: int = 5):
 
     print_box_header("TRADE DETAILS")
 
+    # Exit reason abbreviations
+    exit_abbrev = {
+        'stop_loss': 'SL',
+        'take_profit': 'TP',
+        'regime_change': 'REG',
+        'end_of_data': 'END'
+    }
+
     # Recent trades
     print(f"\nLast {min(show_n, len(trades))} Trades:")
-    print("-" * 120)
-    print(f"{'Time':<20} {'Side':<6} {'Entry':<12} {'Exit':<12} {'Duration':<10} {'PnL $':<12} {'PnL %':<10} {'Costs $':<10}")
-    print("-" * 120)
+    print("-" * 130)
+    print(f"{'Time':<20} {'Side':<6} {'Entry':<12} {'Exit':<12} {'SL':<12} {'TP':<12} {'Exit':<5} {'PnL $':<12} {'PnL %':<10}")
+    print("-" * 130)
 
     for trade in trades[-show_n:]:
         entry_time = pd.to_datetime(trade['entry_time']).strftime('%Y-%m-%d %H:%M')
         side = trade['side'].upper()
         entry_price = f"${trade['entry_price']:,.2f}"
         exit_price = f"${trade['exit_price']:,.2f}"
-        duration = f"{trade['duration_bars']} bars"
+        sl_price = f"${trade.get('stop_loss', 0):,.2f}" if trade.get('stop_loss') else "N/A"
+        tp_price = f"${trade.get('take_profit', 0):,.2f}" if trade.get('take_profit') else "N/A"
+        exit_reason = exit_abbrev.get(trade.get('exit_reason', ''), '?')
         pnl_dollars = f"${trade['pnl']:,.2f}"
         pnl_pct = f"{trade['pnl_pct']:+.2f}%"
-        costs = f"${trade['commission_paid'] + trade['slippage_cost']:.2f}"
 
-        print(f"{entry_time:<20} {side:<6} {entry_price:<12} {exit_price:<12} {duration:<10} {pnl_dollars:<12} {pnl_pct:<10} {costs:<10}")
+        print(f"{entry_time:<20} {side:<6} {entry_price:<12} {exit_price:<12} {sl_price:<12} {tp_price:<12} {exit_reason:<5} {pnl_dollars:<12} {pnl_pct:<10}")
 
     # Best and worst trades
     if len(trades) > 1:
         print("\nBest & Worst Trades:")
-        print("-" * 120)
+        print("-" * 130)
 
         best_trade = max(trades, key=lambda t: t['pnl'])
         worst_trade = min(trades, key=lambda t: t['pnl'])
 
+        best_exit = exit_abbrev.get(best_trade.get('exit_reason', ''), '?')
+        worst_exit = exit_abbrev.get(worst_trade.get('exit_reason', ''), '?')
+
         print(f"Best:  {pd.to_datetime(best_trade['entry_time']).strftime('%Y-%m-%d')} | "
               f"{best_trade['side'].upper():<6} | ${best_trade['pnl']:>10,.2f} ({best_trade['pnl_pct']:+.2f}%) | "
-              f"{best_trade['duration_bars']} bars")
+              f"{best_trade['duration_bars']} bars | Exit: {best_exit}")
         print(f"Worst: {pd.to_datetime(worst_trade['entry_time']).strftime('%Y-%m-%d')} | "
               f"{worst_trade['side'].upper():<6} | ${worst_trade['pnl']:>10,.2f} ({worst_trade['pnl_pct']:+.2f}%) | "
-              f"{worst_trade['duration_bars']} bars")
+              f"{worst_trade['duration_bars']} bars | Exit: {worst_exit}")
 
         # Average duration
         avg_duration = np.mean([t['duration_bars'] for t in trades])
@@ -886,6 +999,28 @@ def print_summary_table(result: dict, config_name: str, bh_result: dict = None):
     print(f"{'Largest Win:':<30} ${m['largest_win']:>10,.2f}")
     print(f"{'Largest Loss:':<30} ${m['largest_loss']:>10,.2f}")
     print(f"{'Avg Trade Duration:':<30} {m['avg_trade_duration_bars']:>10.1f} bars")
+
+    # Exit breakdown
+    if 'exit_counts' in m:
+        print("\nEXIT BREAKDOWN:")
+        print("-" * 60)
+        ec = m['exit_counts']
+        total_exits = sum(ec.values())
+        if total_exits > 0:
+            print(f"{'Stop-Loss Exits:':<30} {ec.get('stop_loss', 0):>6} ({ec.get('stop_loss', 0)/total_exits*100:>5.1f}%)")
+            print(f"{'Take-Profit Exits:':<30} {ec.get('take_profit', 0):>6} ({ec.get('take_profit', 0)/total_exits*100:>5.1f}%)")
+            print(f"{'Regime Change Exits:':<30} {ec.get('regime_change', 0):>6} ({ec.get('regime_change', 0)/total_exits*100:>5.1f}%)")
+            print(f"{'End of Data:':<30} {ec.get('end_of_data', 0):>6} ({ec.get('end_of_data', 0)/total_exits*100:>5.1f}%)")
+
+    # Risk parameters used
+    if 'risk_params' in result:
+        rp = result['risk_params']
+        print("\nRISK PARAMETERS:")
+        print("-" * 60)
+        print(f"{'Risk Per Trade:':<30} {rp['risk_per_trade']*100:>10.1f}%")
+        print(f"{'Stop Loss:':<30} {rp['stop_loss_pct']*100:>10.1f}%")
+        print(f"{'Take Profit:':<30} {rp['take_profit_pct']*100:>10.1f}%")
+        print(f"{'Risk/Reward:':<30} {'1:' + str(int(rp['risk_reward'])):>10}")
 
     print("\nCOSTS & FEES:")
     print("-" * 60)
@@ -1005,8 +1140,22 @@ def main():
     print(f"\nSymbol:          {args.symbol}")
     print(f"Interval:        {args.interval}")
     print(f"Initial Capital: ${args.capital:,.2f}")
-    print(f"Position Size:   {args.position_size * 100:.1f}%")
-    print(f"Commission:      {args.commission * 100:.3f}% per trade")
+
+    # Risk Management Display
+    take_profit_pct = args.stop_loss_pct * args.risk_reward
+    if args.position_size is not None:
+        print(f"Position Size:   {args.position_size * 100:.1f}% (manual)")
+    else:
+        auto_pos_size = args.risk_per_trade / args.stop_loss_pct
+        print(f"Position Size:   {min(auto_pos_size, 1.0) * 100:.1f}% (auto: {args.risk_per_trade*100:.1f}% risk / {args.stop_loss_pct*100:.1f}% SL)")
+
+    print(f"\n--- RISK MANAGEMENT ---")
+    print(f"Risk Per Trade:  {args.risk_per_trade * 100:.1f}% of account (max ${args.capital * args.risk_per_trade:,.2f} loss)")
+    print(f"Stop Loss:       {args.stop_loss_pct * 100:.1f}% from entry")
+    print(f"Take Profit:     {take_profit_pct * 100:.1f}% from entry (1:{args.risk_reward:.0f} R:R)")
+    print(f"-----------------------")
+
+    print(f"\nCommission:      {args.commission * 100:.3f}% per trade")
     print(f"Slippage:        {args.slippage * 100:.3f}% per trade")
     if args.start_date:
         print(f"Start Date:      {args.start_date}")
@@ -1082,7 +1231,9 @@ def main():
             initial_capital=args.capital,
             position_size=args.position_size,
             commission=args.commission,
-            slippage=args.slippage
+            slippage=args.slippage,
+            risk_per_trade=args.risk_per_trade,
+            stop_loss_pct=args.stop_loss_pct
         )
         print(f"Entry Price:     ${bh_result['entry_price']:,.2f}")
         print(f"Exit Price:      ${bh_result['exit_price']:,.2f}")
@@ -1107,13 +1258,16 @@ def main():
                 print(f"  {regime_names.get(regime_id, f'Regime {regime_id}')}: {count:6,} ({pct:5.2f}%)")
 
             # Run backtest (with slippage, executes on NEXT bar's open)
-            print("\nSimulating trades (entry on NEXT bar open)...")
+            print("\nSimulating trades (entry on NEXT bar open, with SL/TP)...")
             result = simulate_regime_strategy(
                 df_with_regime,
                 initial_capital=args.capital,
                 position_size=args.position_size,
                 commission=args.commission,
-                slippage=args.slippage
+                slippage=args.slippage,
+                risk_per_trade=args.risk_per_trade,
+                stop_loss_pct=args.stop_loss_pct,
+                risk_reward=args.risk_reward
             )
 
             results[config_name] = result
